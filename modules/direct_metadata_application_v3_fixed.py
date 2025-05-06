@@ -41,7 +41,6 @@ def get_template_schema(client, full_scope, template_key):
     Returns:
         dict: A dictionary mapping field keys to their types, or None if error.
     """
-    # --- No changes needed here --- 
     cache_key = f'{full_scope}_{template_key}' 
     if cache_key in st.session_state.template_schema_cache:
         logger.info(f"Using cached schema for {full_scope}/{template_key}")
@@ -75,7 +74,6 @@ def convert_value_for_template(key, value, field_type):
     Converts a metadata value to the type specified by the template field.
     Raises ConversionError if conversion fails. (Modified from original to be strict)
     """
-    # --- No changes needed here --- 
     if value is None:
         return None 
         
@@ -141,7 +139,6 @@ def fix_metadata_format(metadata_values):
     Fix the metadata format by converting string representations of dictionaries
     to actual Python dictionaries.
     """
-    # --- No changes needed here --- 
     formatted_metadata = {}
     for key, value in metadata_values.items():
         if isinstance(value, str) and value.startswith('{') and value.endswith('}'):
@@ -159,7 +156,6 @@ def flatten_metadata_for_template(metadata_values):
     """
     Flatten the metadata structure if needed (e.g., extracting from 'answer').
     """
-    # --- No changes needed here --- 
     flattened_metadata = {}
     if 'answer' in metadata_values and isinstance(metadata_values['answer'], dict):
         for key, value in metadata_values['answer'].items():
@@ -177,7 +173,6 @@ def filter_confidence_fields(metadata_values):
     """
     Filter out confidence score fields (keys ending with "_confidence").
     """
-    # --- No changes needed here --- 
     return {key: value for key, value in metadata_values.items() if not key.endswith("_confidence")} 
 
 def parse_template_id(template_id_full):
@@ -196,7 +191,6 @@ def parse_template_id(template_id_full):
     Raises:
         ValueError: If the format is invalid.
     """
-    # --- No changes needed here --- 
     if not template_id_full or '_' not in template_id_full:
         raise ValueError(f"Invalid template ID format: {template_id_full}")
     
@@ -359,178 +353,278 @@ def apply_metadata_direct(client, selected_files_data, metadata_results, templat
     Handles per-file template mapping or a default template.
     (This is the main entry point called by the Streamlit app)
     """
+    logger.info("Starting direct metadata application process...")
     if not selected_files_data:
         st.warning("No files selected for metadata application.")
         return
 
-    if not client:
-        st.error("Box client is not initialized. Cannot apply metadata.")
-        return
+    if use_direct_json_input:
+        if not direct_json_input:
+            st.error("JSON input is selected, but no JSON data provided.")
+            return
+        try:
+            # Attempt to parse the JSON input for all files
+            common_metadata_from_json = json.loads(direct_json_input)
+            if not isinstance(common_metadata_from_json, dict):
+                st.error("JSON input must be a valid JSON object (dictionary).")
+                return
+            logger.info(f"Using common metadata from direct JSON input: {common_metadata_from_json}")
+        except json.JSONDecodeError as e:
+            st.error(f"Invalid JSON input: {e}. Please provide a valid JSON object.")
+            return
+    else:
+        if not metadata_results:
+            st.warning("No metadata results available from AI extraction to apply.")
+            return
+        common_metadata_from_json = None # Not using direct JSON
 
     overall_success_count = 0
-    overall_failure_count = 0
-    results_summary = []
+    overall_error_count = 0
+    results_summary = [] # To store (file_name, status, message)
 
     for file_data in selected_files_data:
         file_id = file_data['id']
         file_name = file_data['name']
-        doc_category = file_data.get('doc_category', 'Unknown') # Get category or default
+        logger.info(f"Processing file: {file_name} (ID: {file_id})")
 
-        current_metadata_values = None
-        current_full_scope = None
-        current_template_key = None
-
+        current_metadata_values = {}
         if use_direct_json_input:
-            logger.info(f"Using direct JSON input for file {file_id} ({file_name}).")
-            try:
-                # Use the already parsed direct_json_input if available and valid
-                if isinstance(direct_json_input, dict):
-                    current_metadata_values = direct_json_input
-                else:
-                    current_metadata_values = json.loads(direct_json_input) # Assuming direct_json_input is a string here
-                
-                # For direct JSON, we assume global.properties unless a specific template is part of the JSON structure (advanced)
-                # Or, if a default template is provided and we want to apply to it.
-                # For simplicity now, assume direct JSON might be free-form or target a specific template if default_template_id is set.
-                if default_template_id:
-                    try:
-                        current_full_scope, current_template_key = parse_template_id(default_template_id)
-                        logger.info(f"Direct JSON input will be applied to template: {current_full_scope}/{current_template_key}")
-                    except ValueError as e:
-                        st.error(f"Invalid default template ID format for direct JSON: {default_template_id}. Error: {e}")
-                        results_summary.append({'file_name': file_name, 'status': 'Error', 'message': f"Invalid default template ID: {e}"}) 
-                        overall_failure_count += 1
-                        continue # Skip this file
-                else: # Fallback to global.properties for direct JSON if no default template specified
-                    current_full_scope = "global"
-                    current_template_key = "properties"
-                    logger.info(f"Direct JSON input will be applied to global.properties for file {file_id}")
-
-            except json.JSONDecodeError as e:
-                st.error(f"Invalid JSON input: {e}. Cannot apply metadata to {file_name}.")
-                results_summary.append({'file_name': file_name, 'status': 'Error', 'message': f"Invalid JSON input: {e}"})
-                overall_failure_count += 1
-                continue # Skip this file
-            except Exception as e: # Catch any other error during direct JSON processing
-                st.error(f"Error processing direct JSON input for {file_name}: {e}")
-                results_summary.append({'file_name': file_name, 'status': 'Error', 'message': f"Error processing direct JSON: {e}"})
-                overall_failure_count += 1
-                continue
+            current_metadata_values = common_metadata_from_json.copy()
+            logger.info(f"Using direct JSON input for file {file_name}")
+        elif file_id in metadata_results:
+            # Use AI extracted metadata, flatten and fix format
+            raw_extracted_metadata = metadata_results[file_id].get('extracted_metadata', {})
+            fixed_format_metadata = fix_metadata_format(raw_extracted_metadata)
+            current_metadata_values = flatten_metadata_for_template(fixed_format_metadata)
+            logger.info(f"Using AI extracted metadata for file {file_name}: {current_metadata_values}")
         else:
-            # Use AI extracted metadata results
-            if file_id not in metadata_results or not metadata_results[file_id].get('extracted_metadata'):
-                st.warning(f"No extracted metadata found for {file_name} (ID: {file_id}). Skipping.")
-                results_summary.append({'file_name': file_name, 'status': 'Skipped', 'message': 'No extracted metadata available.'})
-                continue # Skip this file
-            
-            current_metadata_values = metadata_results[file_id]['extracted_metadata']
-            
-            # Determine template: per-file mapping or default
-            template_id_to_use = default_template_id
-            if template_mappings and doc_category in template_mappings and template_mappings[doc_category]:
-                template_id_to_use = template_mappings[doc_category]
-                logger.info(f"Using mapped template '{template_id_to_use}' for file {file_name} (category: {doc_category})")
-            elif not default_template_id:
-                 # Fallback to global.properties if no mapping and no default
-                logger.info(f"No specific template mapping for category '{doc_category}' and no default template. Falling back to global.properties for {file_name}.")
-                current_full_scope = "global"
-                current_template_key = "properties"
-            else:
-                logger.info(f"Using default template '{default_template_id}' for file {file_name} (category: {doc_category})")
-
-            if not current_full_scope: # If not already set to global.properties fallback
-                try:
-                    current_full_scope, current_template_key = parse_template_id(template_id_to_use)
-                except ValueError as e:
-                    st.error(f"Invalid template ID format '{template_id_to_use}' for {file_name}. Error: {e}")
-                    results_summary.append({'file_name': file_name, 'status': 'Error', 'message': f"Invalid template ID '{template_id_to_use}': {e}"})
-                    overall_failure_count += 1
-                    continue # Skip this file
-
-        # Pre-process and flatten metadata (common for both direct JSON and AI extracted)
-        if not isinstance(current_metadata_values, dict):
-            logger.error(f"Metadata values for {file_name} are not a dictionary: {current_metadata_values}")
-            st.error(f"Internal error: metadata for {file_name} is not in the expected format. Skipping.")
-            results_summary.append({'file_name': file_name, 'status': 'Error', 'message': 'Metadata not in dict format.'})
-            overall_failure_count += 1
+            logger.warning(f"No metadata found for file {file_name} (ID: {file_id}) in AI results. Skipping.")
+            results_summary.append((file_name, "Skipped", "No AI metadata available."))
             continue
-
-        current_metadata_values = fix_metadata_format(current_metadata_values)
-        current_metadata_values = flatten_metadata_for_template(current_metadata_values)
 
         if not current_metadata_values:
-            st.info(f"No metadata to apply for {file_name} after pre-processing. Skipping.")
-            results_summary.append({'file_name': file_name, 'status': 'Skipped', 'message': 'No metadata after pre-processing.'})
+            logger.warning(f"No metadata values to apply for file {file_name} after processing. Skipping.")
+            results_summary.append((file_name, "Skipped", "No metadata to apply after processing."))
             continue
 
-        # Apply to the file
+        # Determine the template to use for this file
+        chosen_template_id = default_template_id
+        if template_mappings and file_id in template_mappings and template_mappings[file_id]:
+            chosen_template_id = template_mappings[file_id]
+            logger.info(f"Using mapped template '{chosen_template_id}' for file {file_name}.")
+        else:
+            logger.info(f"Using default template '{chosen_template_id}' for file {file_name}.")
+
+        if not chosen_template_id:
+            logger.error(f"No template ID determined for file {file_name}. Cannot apply metadata.")
+            st.error(f"Critical error: No template ID for {file_name}. Skipping.")
+            results_summary.append((file_name, "Error", "No template ID determined."))
+            overall_error_count += 1
+            continue
+        
+        try:
+            full_scope, template_key = parse_template_id(chosen_template_id)
+        except ValueError as e:
+            logger.error(f"Invalid template ID format '{chosen_template_id}' for file {file_name}: {e}")
+            st.error(f"Invalid template ID format '{chosen_template_id}' for {file_name}. Skipping.")
+            results_summary.append((file_name, "Error", f"Invalid template ID: {e}"))
+            overall_error_count += 1
+            continue
+
+        # Call the internal function to apply metadata to the single file
         success, message = apply_metadata_to_file_direct(
             client,
             file_id,
             file_name,
-            current_metadata_values,
-            current_full_scope,
-            current_template_key
+            current_metadata_values, 
+            full_scope, 
+            template_key
         )
 
         if success:
             overall_success_count += 1
-            results_summary.append({'file_name': file_name, 'status': 'Success', 'message': message})
+            results_summary.append((file_name, "Success", message))
         else:
-            overall_failure_count += 1
-            results_summary.append({'file_name': file_name, 'status': 'Failure', 'message': message})
-    
-    # Display summary
+            overall_error_count += 1
+            results_summary.append((file_name, "Error", message))
+
+    # Display summary of operations
     st.subheader("Metadata Application Summary")
-    if overall_success_count > 0:
-        st.success(f"Successfully applied/updated metadata for {overall_success_count} file(s).")
-    if overall_failure_count > 0:
-        st.error(f"Failed to apply/update metadata for {overall_failure_count} file(s).")
-    
-    # Display detailed results in a more structured way if needed
     if results_summary:
-        st.dataframe(results_summary)
-
-    logger.info(f"Metadata application process finished. Success: {overall_success_count}, Failure: {overall_failure_count}")
-
-# Example of how this might be called (for testing or integration context)
-# This part would typically be in your main Streamlit app.py
-if __name__ == '__main__':
-    # Mock objects for testing - replace with actual objects in your app
-    mock_client = None # Replace with an actual Box Client
-    mock_selected_files = [{'id': '12345', 'name': 'TestFile1.pdf', 'doc_category': 'Invoice'},
-                           {'id': '67890', 'name': 'TestFile2.docx', 'doc_category': 'Contract'}]
-    mock_metadata_results = {
-        '12345': {'extracted_metadata': {'InvoiceNumber': 'INV-001', 'Amount': '100.50', 'Vendor': 'TestVendor'}},
-        '67890': {'extracted_metadata': {'ContractValue': '5000', 'EffectiveDate': '2024-01-01', 'PartyA': 'Client Corp'}}
-    }
-    mock_template_mappings = {'Invoice': 'enterprise_123_invoiceTemplate', 'Contract': 'enterprise_123_contractTemplate'}
-    mock_default_template_id = "global_properties" # Or a specific template like 'enterprise_123_defaultDoc'
+        for name, status, msg in results_summary:
+            if status == "Success":
+                st.success(f"{name}: {status} - {msg}")
+            elif status == "Error":
+                st.error(f"{name}: {status} - {msg}")
+            else:
+                st.info(f"{name}: {status} - {msg}")
     
-    # Simulate Streamlit UI elements for testing
-    st.title("Metadata Application Test")
-    use_direct_json = st.checkbox("Use Direct JSON Input", False)
-    direct_json_str = "{}"
-    if use_direct_json:
-        direct_json_str = st.text_area("Enter JSON Metadata", value='{"customField1": "customValue1"}')
+    if overall_success_count > 0:
+        st.balloons()
+        st.success(f"Successfully applied/updated metadata for {overall_success_count} file(s).")
+    if overall_error_count > 0:
+        st.error(f"Failed to apply/update metadata for {overall_error_count} file(s). Check logs for details.")
+    if not selected_files_data:
+        st.info("No files were processed.")
 
-    if st.button("Apply Metadata"):
-        parsed_direct_json = None
-        if use_direct_json:
-            try:
-                parsed_direct_json = json.loads(direct_json_str)
-            except json.JSONDecodeError as e:
-                st.error(f"Invalid JSON: {e}")
-                # In a real app, you might prevent further execution or handle this more gracefully
-        
-        # apply_metadata_direct(
-        #     mock_client, 
-        #     mock_selected_files, 
-        #     mock_metadata_results, 
-        #     mock_template_mappings, 
-        #     mock_default_template_id,
-        #     use_direct_json,
-        #     parsed_direct_json # Pass the parsed dictionary
-        # )
-        st.write("Test run complete (actual call commented out as mock_client is None).")
-        st.write("To run this test, provide a valid Box Client and uncomment the call.")
+    logger.info(f"Direct metadata application process finished. Success: {overall_success_count}, Errors: {overall_error_count}")
+
+# Example of how this might be called (for testing or if run standalone)
+if __name__ == '__main__':
+    # This is a placeholder for testing and would require a mock client and data.
+    # In the Streamlit app, this module is imported and functions are called directly.
+    st.title("Metadata Application Module (Test Mode)")
+    logger.info("Module run in test mode.")
+
+    # Mock Box Client (replace with actual client for real use)
+    class MockBoxClient:
+        def file(self, file_id):
+            logger.info(f"MockBoxClient: file(file_id='{file_id}') called")
+            return MockFile(file_id, self)
+        def metadata_template(self, scope, template_key):
+            logger.info(f"MockBoxClient: metadata_template(scope='{scope}', template_key='{template_key}') called")
+            if scope == "global" and template_key == "properties":
+                 return MockMetadataTemplate(scope, template_key, fields=[]) # No schema for global
+            if scope == "enterprise_123" and template_key == "testTemplate":
+                return MockMetadataTemplate(scope, template_key, fields=[
+                    {'key': 'description', 'type': 'string'},
+                    {'key': 'amount', 'type': 'float'},
+                    {'key': 'docDate', 'type': 'date'}
+                ])
+            raise exception.BoxAPIException(status=404, message="Template not found")
+
+    class MockFile:
+        def __init__(self, file_id, client):
+            self.id = file_id
+            self._client = client
+            self._metadata_instances = {}
+            logger.info(f"MockFile created for ID: {self.id}")
+
+        def metadata(self, scope, template):
+            logger.info(f"MockFile: metadata(scope='{scope}', template='{template}') called for file ID {self.id}")
+            key = f"{scope}_{template}"
+            if key not in self._metadata_instances:
+                self._metadata_instances[key] = MockMetadataInstance(self, scope, template, self._client)
+            return self._metadata_instances[key]
+
+    class MockMetadataTemplate:
+        def __init__(self, scope, template_key, fields):
+            self.scope = scope
+            self.template_key = template_key
+            self.fields = fields
+            logger.info(f"MockMetadataTemplate created: {scope}/{template_key} with fields: {fields}")
+        def get(self):
+            logger.info(f"MockMetadataTemplate: get() called for {self.scope}/{self.template_key}")
+            return self # Return self as the get() method in SDK returns the template object
+
+    class MockMetadataInstance:
+        def __init__(self, file_obj, scope, template, client):
+            self._file = file_obj
+            self.scope = scope
+            self.template = template
+            self._client = client
+            self._data = None # Stores the actual metadata
+            self._exists = False
+            logger.info(f"MockMetadataInstance created for file {file_obj.id}, template {scope}/{template}")
+
+        def create(self, metadata):
+            logger.info(f"MockMetadataInstance: create() called with {metadata} for file {self._file.id}")
+            if self._exists:
+                raise exception.BoxAPIException(status=409, message="Metadata instance already exists")
+            self._data = metadata
+            self._exists = True
+            logger.info(f"MockMetadataInstance: created data {self._data}")
+            return self._data # Return the applied metadata
+
+        def update(self, metadata_update_obj_or_dict):
+            logger.info(f"MockMetadataInstance: update() called with {metadata_update_obj_or_dict} for file {self._file.id}")
+            if not self._exists:
+                # This case might not happen if create is always tried first
+                # but good to simulate for robustness
+                raise exception.BoxAPIException(status=404, message="Metadata instance not found, cannot update")
+            
+            if isinstance(metadata_update_obj_or_dict, MetadataUpdate):
+                # Simulate applying operations from MetadataUpdate
+                if self._data is None: self._data = {}
+                for op in metadata_update_obj_or_dict.get_updates():
+                    # Simplified: only handles 'add' and 'replace' which are similar here
+                    # Path is like "/fieldName"
+                    key = op['path'][1:] 
+                    self._data[key] = op['value']
+                logger.info(f"MockMetadataInstance: updated data (from MetadataUpdate) to {self._data}")
+            elif isinstance(metadata_update_obj_or_dict, dict):
+                # Direct dictionary update (for global.properties)
+                if self._data is None: self._data = {}
+                self._data.update(metadata_update_obj_or_dict)
+                logger.info(f"MockMetadataInstance: updated data (from dict) to {self._data}")
+            else:
+                raise ValueError("Invalid type for metadata update")
+            return self._data # Return the updated metadata
+
+    # --- Test Data ---
+    mock_client = MockBoxClient()
+    mock_selected_files = [
+        {'id': 'file123', 'name': 'TestDocument1.pdf'},
+        {'id': 'file456', 'name': 'AnotherDoc.docx'}
+    ]
+    mock_ai_results = {
+        'file123': {
+            'extracted_metadata': {
+                'description': 'This is a test document.',
+                'amount': '123.45',
+                'docDate': '2023-10-26T10:00:00Z',
+                'custom_field_confidence': 0.9
+            }
+        },
+        'file456': {
+            'extracted_metadata': {
+                'loanID': 'L001',
+                'applicantName': 'John Doe',
+                'status': 'Pending'
+            }
+        }
+    }
+    mock_template_mappings = {
+        'file123': 'enterprise_123_testTemplate'
+    }
+    default_template_id_test = 'global_properties' # Fallback for file456
+
+    st.sidebar.header("Test Controls")
+    run_test = st.sidebar.button("Run Test Application")
+
+    if run_test:
+        st.subheader("Test Run Output:")
+        apply_metadata_direct(
+            client=mock_client, 
+            selected_files_data=mock_selected_files, 
+            metadata_results=mock_ai_results, 
+            template_mappings=mock_template_mappings, 
+            default_template_id=default_template_id_test,
+            use_direct_json_input=False,
+            direct_json_input=""
+        )
+
+        st.info("Test with direct JSON input (global.properties):")
+        direct_json_test = {"project": "Alpha", "version": "1.1"}
+        apply_metadata_direct(
+            client=mock_client, 
+            selected_files_data=[mock_selected_files[0]], # Just one file
+            metadata_results={}, 
+            template_mappings={}, 
+            default_template_id='global_properties',
+            use_direct_json_input=True,
+            direct_json_input=json.dumps(direct_json_test)
+        )
+
+        st.info("Test with direct JSON input (structured template):")
+        direct_json_structured_test = {"description": "Direct JSON Desc", "amount": 789.01}
+        apply_metadata_direct(
+            client=mock_client, 
+            selected_files_data=[mock_selected_files[0]], # Just one file
+            metadata_results={}, 
+            template_mappings={}, 
+            default_template_id='enterprise_123_testTemplate',
+            use_direct_json_input=True,
+            direct_json_input=json.dumps(direct_json_structured_test)
+        )
+
