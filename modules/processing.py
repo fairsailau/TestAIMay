@@ -8,8 +8,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import json
 import concurrent.futures # Not fully implemented for parallel, consider simplifying if not used
 
-# Configure logginlogging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Import necessary functions from other modules
